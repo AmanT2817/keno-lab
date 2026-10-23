@@ -43,11 +43,64 @@ export interface SavedSet {
   createdAt: string;
 }
 
+/**
+ * Server-authoritative current round state, polled from
+ * /api/game/current-round. The browser derives ALL visible game phases
+ * from this object — never from a client timer.
+ */
+export interface CurrentRoundState {
+  round: {
+    id: string;
+    roundNumber: number | null;
+    status: string;
+    phase: "OPEN" | "DRAWING" | "RESULTS" | "WAITING";
+    opensAt: string;
+    closesAt: string | null;
+    drawnAt: string | null;
+    settledAt: string | null;
+    scheduledClosesAt: string | null;
+    scheduledDrawnAt: string | null;
+    scheduledSettledAt: string | null;
+    scheduledNextRoundAt: string | null;
+    rulesVersion: string;
+  };
+  draw: {
+    winningNumbers: number[];
+    revealedCount: number;
+    totalCount: number;
+    algorithmVersion: string | null;
+  };
+  serverTime: number;
+  countdownMs: number;
+  nextPhaseLabel: string;
+}
+
+/**
+ * The user's submitted ticket for the current round. Persisted only in
+ * memory; cleared when the round changes so old tickets can't be re-submitted.
+ */
+export interface SubmittedTicket {
+  ticketId: string;
+  roundId: string;
+  roundNumber: number | null;
+  selectedNumbers: number[];
+  spots: number;
+  stakeMinor: number;
+  status: string;
+  createdAt: string;
+}
+
 interface KenoState {
   // Player + game state
   playerBalanceMinor: number | null;
   totalRounds: number;
   totalTickets: number;
+
+  // Current scheduled round (server-driven)
+  currentRound: CurrentRoundState | null;
+  currentRoundLoading: boolean;
+  submittedTicket: SubmittedTicket | null; // ticket for the CURRENT round
+  lastOutcome: PlayOutcome | null;          // last settled ticket outcome
 
   // Selection state
   selectedNumbers: number[];
@@ -59,11 +112,7 @@ interface KenoState {
   // Stake
   stakeMinor: number;
 
-  // Drawing/animation state
-  isPlaying: boolean;
-  drawnNumbers: number[];
-  revealedCount: number;
-  lastOutcome: PlayOutcome | null;
+  // Error state
   errorMessage: string | null;
 
   // History
@@ -90,6 +139,10 @@ interface KenoState {
   // Actions
   setBalance: (n: number) => void;
   setStats: (rounds: number, tickets: number) => void;
+  setCurrentRound: (state: CurrentRoundState | null) => void;
+  setCurrentRoundLoading: (b: boolean) => void;
+  setSubmittedTicket: (t: SubmittedTicket | null) => void;
+  setLastOutcome: (o: PlayOutcome | null) => void;
   toggleNumber: (n: number) => void;
   setSelection: (numbers: number[]) => void;
   setStake: (n: number) => void;
@@ -100,10 +153,6 @@ interface KenoState {
   saveCurrentSet: (name: string) => void;
   loadSavedSet: (id: string) => void;
   deleteSavedSet: (id: string) => void;
-  startPlay: () => void;
-  setDrawn: (drawn: number[]) => void;
-  revealNext: () => void;
-  finishPlay: (outcome: PlayOutcome) => void;
   setError: (msg: string | null) => void;
   reset: () => void;
   setHistory: (items: HistoryItem[]) => void;
@@ -144,16 +193,17 @@ export const useKenoStore = create<KenoState>()(
       totalRounds: 0,
       totalTickets: 0,
 
+      currentRound: null,
+      currentRoundLoading: false,
+      submittedTicket: null,
+      lastOutcome: null,
+
       selectedNumbers: [],
       undoStack: [],
       redoStack: [],
 
       stakeMinor: 1000,
 
-      isPlaying: false,
-      drawnNumbers: [],
-      revealedCount: 0,
-      lastOutcome: null,
       errorMessage: null,
 
       history: [],
@@ -176,9 +226,50 @@ export const useKenoStore = create<KenoState>()(
       setStats: (rounds, tickets) =>
         set({ totalRounds: rounds, totalTickets: tickets }),
 
+      /**
+       * Update the current round state from the server. If the round ID
+       * has changed (meaning a new round opened), reset the per-round
+       * selection state and clear the in-progress ticket so the user
+       * starts fresh in the new round. This is the SOLE place where
+       * cross-round selection reset happens — never do it on draw
+       * animation start.
+       *
+       * IMPORTANT: savedSets, theme, balance, history, and all
+       * persisted/responsible-play state are explicitly NOT cleared
+       * — only the round-scoped selection state.
+       */
+      setCurrentRound: (next) => {
+        const state = get();
+        const prevId = state.currentRound?.round.id;
+        const nextId = next?.round.id;
+        if (prevId === nextId) {
+          // Same round, just refresh state (countdown tick etc.).
+          set({ currentRound: next });
+          return;
+        }
+        // Round ID changed (or first load / null → round).
+        // Reset per-round state so the user starts fresh.
+        set({
+          currentRound: next,
+          selectedNumbers: [],
+          undoStack: [],
+          redoStack: [],
+          submittedTicket: null,
+          lastOutcome: null,
+          errorMessage: null,
+        });
+      },
+
+      setCurrentRoundLoading: (b) => set({ currentRoundLoading: b }),
+      setSubmittedTicket: (t) => set({ submittedTicket: t }),
+      setLastOutcome: (o) => set({ lastOutcome: o }),
+
       toggleNumber: (n) => {
         const state = get();
-        if (state.isPlaying) return;
+        // Block selection while not in OPEN phase (betting closed).
+        const phase = state.currentRound?.round.phase;
+        if (phase && phase !== "OPEN") return;
+        if (state.submittedTicket) return; // already submitted this round
         const has = state.selectedNumbers.includes(n);
         const next = has
           ? state.selectedNumbers.filter((x) => x !== n)
@@ -194,6 +285,9 @@ export const useKenoStore = create<KenoState>()(
 
       setSelection: (numbers) => {
         const state = get();
+        const phase = state.currentRound?.round.phase;
+        if (phase && phase !== "OPEN") return;
+        if (state.submittedTicket) return;
         const sorted = [...numbers].sort((a, b) => a - b);
         if (
           sorted.length === state.selectedNumbers.length &&
@@ -210,7 +304,9 @@ export const useKenoStore = create<KenoState>()(
 
       quickPick: (count) => {
         const state = get();
-        if (state.isPlaying) return;
+        const phase = state.currentRound?.round.phase;
+        if (phase && phase !== "OPEN") return;
+        if (state.submittedTicket) return;
         const n = count ?? Math.max(1, state.selectedNumbers.length || 6);
         const picked = randomUniqueIntegers(n, KENO_POOL_SIZE);
         set({
@@ -221,7 +317,9 @@ export const useKenoStore = create<KenoState>()(
 
       clearSelection: () => {
         const state = get();
-        if (state.isPlaying) return;
+        const phase = state.currentRound?.round.phase;
+        if (phase && phase !== "OPEN") return;
+        if (state.submittedTicket) return;
         if (state.selectedNumbers.length === 0) return;
         set({
           selectedNumbers: [],
@@ -231,6 +329,9 @@ export const useKenoStore = create<KenoState>()(
 
       undo: () => {
         const state = get();
+        const phase = state.currentRound?.round.phase;
+        if (phase && phase !== "OPEN") return;
+        if (state.submittedTicket) return;
         if (state.undoStack.length === 0) return;
         const prev = state.undoStack[state.undoStack.length - 1];
         set({
@@ -242,6 +343,9 @@ export const useKenoStore = create<KenoState>()(
 
       redo: () => {
         const state = get();
+        const phase = state.currentRound?.round.phase;
+        if (phase && phase !== "OPEN") return;
+        if (state.submittedTicket) return;
         if (state.redoStack.length === 0) return;
         const next = state.redoStack[state.redoStack.length - 1];
         set({
@@ -265,6 +369,9 @@ export const useKenoStore = create<KenoState>()(
 
       loadSavedSet: (id) => {
         const state = get();
+        const phase = state.currentRound?.round.phase;
+        if (phase && phase !== "OPEN") return;
+        if (state.submittedTicket) return;
         const found = state.savedSets.find((s) => s.id === id);
         if (!found) return;
         set({
@@ -277,43 +384,14 @@ export const useKenoStore = create<KenoState>()(
         set((s) => ({ savedSets: s.savedSets.filter((x) => x.id !== id) }));
       },
 
-      startPlay: () =>
-        set({
-          isPlaying: true,
-          drawnNumbers: [],
-          revealedCount: 0,
-          lastOutcome: null,
-          errorMessage: null,
-          sessionStartedAt:
-            get().sessionStartedAt ?? Date.now(),
-        }),
-
-      setDrawn: (drawn) => set({ drawnNumbers: drawn }),
-
-      revealNext: () => {
-        const state = get();
-        if (!state.isPlaying) return;
-        if (state.revealedCount >= state.drawnNumbers.length) return;
-        set({ revealedCount: state.revealedCount + 1 });
-      },
-
-      finishPlay: (outcome) =>
-        set({
-          isPlaying: false,
-          revealedCount: 20,
-          lastOutcome: outcome,
-        }),
-
-      setError: (msg) => set({ errorMessage: msg, isPlaying: false }),
+      setError: (msg) => set({ errorMessage: msg }),
 
       reset: () =>
         set({
           selectedNumbers: [],
           undoStack: [],
           redoStack: [],
-          isPlaying: false,
-          drawnNumbers: [],
-          revealedCount: 0,
+          submittedTicket: null,
           lastOutcome: null,
           errorMessage: null,
         }),

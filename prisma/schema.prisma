@@ -10,8 +10,8 @@ generator client {
 
 datasource db {
   provider  = "postgresql"
-  url       = env("DATABASE_URL")
-  directUrl = env("DIRECT_URL")
+  url       = env("DATABASE_URL")      // pooled connection (runtime)
+  directUrl = env("DIRECT_URL")        // direct connection (migrations)
 }
 
 // A player holds the simulated balance. Balance is derived from
@@ -26,19 +26,37 @@ model Player {
   ledgerEntries LedgerEntry[]
 }
 
-// Lifecycle of a Keno round. In this single-player demo each round
-// receives one ticket, then transitions OPEN -> CLOSED -> DRAWN -> SETTLED.
-// The state machine is preserved so a multi-player extension is trivial.
+// Lifecycle of a Keno round. The state machine is OPEN -> CLOSED -> DRAWN
+// -> SETTLED -> ARCHIVED. Each scheduled round has four scheduled timestamps
+// that drive the server-authoritative lifecycle:
+//   - scheduledClosesAt   = opensAt + OPEN_DURATION_MS         (betting closes)
+//   - scheduledDrawnAt    = scheduledClosesAt                   (draw begins)
+//   - scheduledSettledAt  = scheduledDrawnAt + DRAW_DURATION_MS (reveal animation done)
+//   - scheduledNextRoundAt= scheduledSettledAt + WAIT_DURATION_MS (next round opens)
+//
+// `advanceRoundsIfNeeded()` runs on every API request and lazily advances
+// the current round through its phases based on the server clock. This
+// keeps the round schedule authoritative — clients cannot speed it up,
+// slow it down, or trigger duplicate draws.
 model GameRound {
-  id           String       @id @default(cuid())
-  status       String       // OPEN | CLOSED | DRAWN | SETTLED
-  opensAt      DateTime     @default(now())
-  closesAt     DateTime?
-  drawnAt      DateTime?
-  settledAt    DateTime?
-  rulesVersion String       @default("v1")
-  tickets      Ticket[]
-  drawResult   DrawResult?
+  id                    String       @id @default(cuid())
+  roundNumber           Int?                          // sequential, for display (null for legacy rounds)
+  status                String       // OPEN | CLOSED | DRAWN | SETTLED | ARCHIVED
+  opensAt               DateTime     @default(now())
+  closesAt              DateTime?
+  drawnAt               DateTime?
+  settledAt             DateTime?
+  scheduledClosesAt     DateTime?    // null for legacy instant-play rounds
+  scheduledDrawnAt      DateTime?
+  scheduledSettledAt    DateTime?
+  scheduledNextRoundAt  DateTime?
+  nextRoundId           String?      // optional link to the successor round
+  rulesVersion          String       @default("v1")
+  tickets               Ticket[]
+  drawResult            DrawResult?
+
+  @@index([status])
+  @@index([scheduledClosesAt])
 }
 
 // A submitted ticket. Selected numbers stored as JSON array string

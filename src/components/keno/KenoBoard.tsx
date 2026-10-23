@@ -6,65 +6,86 @@ import { NumberTile } from "./NumberTile";
 import { cn } from "@/lib/utils";
 
 /**
- * The 1..80 Keno board. During a play the board reflects the
- * server-authoritative draw: each tile is selected, drawn, matched, or
- * idle based on store state. All visual states derive from the same
- * server-persisted numbers — the browser never decides an outcome.
+ * The 1..80 Keno board. Tile states derive entirely from server-authoritative
+ * state polled from /api/game/current-round:
+ *   - "selected" — the user picked this number in the current OPEN round
+ *   - "drawn"    — the server has revealed this number (drawnAt + 1s revealed)
+ *   - "matched"  — drawn AND selected
+ *   - "idle"     — none of the above
+ *
+ * The board never advances state on a client timer. If the user refreshes
+ * mid-draw, the board re-renders from the server's revealedCount — picking
+ * up the animation where the server says it should be.
  */
 export function KenoBoard() {
   const selectedNumbers = useKenoStore((s) => s.selectedNumbers);
-  const drawnNumbers = useKenoStore((s) => s.drawnNumbers);
-  const revealedCount = useKenoStore((s) => s.revealedCount);
-  const isPlaying = useKenoStore((s) => s.isPlaying);
+  const currentRound = useKenoStore((s) => s.currentRound);
   const lastOutcome = useKenoStore((s) => s.lastOutcome);
+  const submittedTicket = useKenoStore((s) => s.submittedTicket);
   const toggleNumber = useKenoStore((s) => s.toggleNumber);
 
-  // The revealed numbers so far (during animation) or all 20 after settle.
-  const revealedDrawn = isPlaying
-    ? drawnNumbers.slice(0, revealedCount)
-    : lastOutcome
-      ? lastOutcome.drawnNumbers
-      : [];
+  const phase = currentRound?.round.phase;
+  const drawnNumbers = currentRound?.draw.winningNumbers ?? [];
+  const revealedCount = currentRound?.draw.revealedCount ?? 0;
+
+  // During DRAWING/RESULTS, show drawn numbers (server-driven subset).
+  // During OPEN/WAITING, no numbers are drawn yet — but if lastOutcome
+  // exists (just-settled ticket), keep showing the completed draw so
+  // the player can see their result.
+  const revealedDrawn =
+    phase === "DRAWING" || phase === "RESULTS" || phase === "WAITING"
+      ? drawnNumbers.slice(0, revealedCount)
+      : lastOutcome
+        ? lastOutcome.drawnNumbers
+        : [];
 
   const matchedSet = new Set(
-    isPlaying
-      ? // during animation, only mark matched numbers that have been revealed
-        // AND are also part of the player's selection
-        selectedNumbers.filter((n) => revealedDrawn.includes(n))
+    phase === "DRAWING" || phase === "RESULTS" || phase === "WAITING"
+      ? // During/after draw, mark matched numbers among revealed.
+        (submittedTicket?.selectedNumbers ?? []).filter((n) =>
+          revealedDrawn.includes(n)
+        )
       : lastOutcome
         ? lastOutcome.matchedNumbers
         : []
   );
 
-  const selectedSet = new Set(selectedNumbers);
+  const selectedSet = new Set(
+    phase === "OPEN"
+      ? selectedNumbers
+      : submittedTicket?.selectedNumbers ?? []
+  );
   const drawnSet = new Set(revealedDrawn);
 
-  const tiles: { number: number; state: TileState; isRevealing: boolean }[] =
-    Array.from({ length: KENO_POOL_SIZE }, (_, i) => {
-      const number = i + 1;
-      const isSelected = selectedSet.has(number);
-      const isDrawn = drawnSet.has(number);
-      const isMatched = matchedSet.has(number);
+  const tiles: {
+    number: number;
+    state: TileState;
+    isRevealing: boolean;
+  }[] = Array.from({ length: KENO_POOL_SIZE }, (_, i) => {
+    const number = i + 1;
+    const isSelected = selectedSet.has(number);
+    const isDrawn = drawnSet.has(number);
+    const isMatched = matchedSet.has(number);
 
-      let state: TileState = "idle";
-      let isRevealing = false;
+    let state: TileState = "idle";
+    let isRevealing = false;
 
-      if (isMatched) {
-        state = "matched";
-        // the tile that just got revealed (the last one in revealedDrawn)
-        isRevealing = revealedDrawn[revealedDrawn.length - 1] === number;
-      } else if (isDrawn) {
-        state = "drawn";
-        isRevealing = revealedDrawn[revealedDrawn.length - 1] === number;
-      } else if (isSelected) {
-        state = "selected";
-      }
+    if (isMatched) {
+      state = "matched";
+      // The tile that just got revealed is the latest in revealedDrawn.
+      isRevealing = revealedDrawn[revealedDrawn.length - 1] === number;
+    } else if (isDrawn) {
+      state = "drawn";
+      isRevealing = revealedDrawn[revealedDrawn.length - 1] === number;
+    } else if (isSelected) {
+      state = "selected";
+    }
 
-      return { number, state, isRevealing };
-    });
+    return { number, state, isRevealing };
+  });
 
-  // Once selection is full, the player can still deselect (toggle is allowed
-  // for currently selected tiles). Only the not-yet-selected ones get disabled.
+  // Disable tile interaction during non-OPEN phases or after ticket submitted.
+  const isBettingOpen = phase === "OPEN" && !submittedTicket;
   const atMax = selectedNumbers.length >= KENO_MAX_SPOTS;
 
   return (
@@ -78,7 +99,7 @@ export function KenoBoard() {
               number={number}
               state={state}
               isRevealing={isRevealing}
-              disabled={isPlaying || (atMax && !isSelected)}
+              disabled={!isBettingOpen || (atMax && !isSelected)}
               onClick={() => toggleNumber(number)}
             />
           );
@@ -93,7 +114,7 @@ export function KenoBoard() {
         <span>
           Spots:{" "}
           <span className="keno-emerald-text font-semibold">
-            {selectedNumbers.length}
+            {selectedSet.size}
           </span>
           /{KENO_MAX_SPOTS}
         </span>

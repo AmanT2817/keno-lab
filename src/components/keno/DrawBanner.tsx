@@ -1,64 +1,124 @@
 "use client";
 
 import { useKenoStore } from "@/lib/keno/store";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
-import { Sparkles, TrendingUp, TrendingDown } from "lucide-react";
+import {
+  Sparkles,
+  TrendingUp,
+  TrendingDown,
+  Hourglass,
+  Lock,
+} from "lucide-react";
 
 /**
- * Banner shown above the board while the draw is being revealed.
- * Each number appears one at a time; the animation is purely cosmetic —
- * the authoritative outcome is already persisted on the server.
+ * Banner above the board. Renders different content based on the
+ * server-authoritative round phase:
+ *   - OPEN      → "Betting open" with countdown to close
+ *   - DRAWING   → "Revealing numbers" with progressive pill list (1s/server-driven)
+ *   - RESULTS   → Final result of the user's submitted ticket (if any)
+ *   - WAITING   → Brief "Next round starting" notice
+ *
+ * The reveal animation is purely cosmetic — the authoritative outcome
+ * is already persisted on the server. The numbers shown are exactly
+ * `currentRound.draw.winningNumbers.slice(0, revealedCount)`, which
+ * the server computes from `drawnAt` + 1s per number.
  */
 export function DrawBanner() {
-  const isPlaying = useKenoStore((s) => s.isPlaying);
-  const drawnNumbers = useKenoStore((s) => s.drawnNumbers);
-  const revealedCount = useKenoStore((s) => s.revealedCount);
+  const currentRound = useKenoStore((s) => s.currentRound);
   const lastOutcome = useKenoStore((s) => s.lastOutcome);
+  const submittedTicket = useKenoStore((s) => s.submittedTicket);
 
-  if (isPlaying) {
-    const revealed = drawnNumbers.slice(0, revealedCount);
+  if (!currentRound) return null;
+
+  const { round, draw, countdownMs, nextPhaseLabel } = currentRound;
+  const phase = round.phase;
+
+  // --- OPEN phase: show "betting open" -------------------------------
+  if (phase === "OPEN") {
+    const seconds = Math.max(0, Math.ceil(countdownMs / 1000));
     return (
       <div className="rounded-xl border border-primary/40 bg-card/80 backdrop-blur p-3 sm:p-4 shadow-lg">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0">
+            <Sparkles className="size-4 keno-emerald-text" />
+            <span className="text-sm font-semibold keno-emerald-text truncate">
+              Betting open — pick your numbers
+            </span>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <span className="text-[11px] text-muted-foreground hidden sm:inline">
+              {nextPhaseLabel}
+            </span>
+            <span className="font-mono text-sm font-semibold tabular-nums keno-amber-text">
+              {String(Math.floor(seconds / 60)).padStart(2, "0")}:
+              {String(seconds % 60).padStart(2, "0")}
+            </span>
+          </div>
+        </div>
+        {submittedTicket && (
+          <div className="mt-2 text-[11px] text-muted-foreground">
+            Ticket submitted ({submittedTicket.spots} spots · $
+            {(submittedTicket.stakeMinor / 100).toFixed(2)}). You can still
+            adjust nothing — wait for the draw at close of betting.
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // --- DRAWING phase: progressive reveal -----------------------------
+  if (phase === "DRAWING") {
+    const revealed = draw.winningNumbers.slice(0, draw.revealedCount);
+    return (
+      <div className="rounded-xl border border-accent/40 bg-card/80 backdrop-blur p-3 sm:p-4 shadow-lg">
         <div className="flex items-center justify-between mb-2">
           <div className="flex items-center gap-2">
-            <Sparkles className="size-4 keno-amber-text animate-pulse" />
+            <Hourglass className="size-4 keno-amber-text animate-pulse" />
             <span className="text-sm font-semibold keno-gold">
-              Drawing 20 numbers...
+              Drawing 20 numbers…
             </span>
           </div>
           <span className="text-xs font-mono text-muted-foreground">
-            {revealedCount}/20
+            {draw.revealedCount}/20
           </span>
         </div>
         <div className="flex flex-wrap gap-1.5 min-h-[2.25rem]">
-          {revealed.map((n) => (
-            <span
-              key={n}
-              className="keno-tile-revealing inline-flex items-center justify-center size-7 sm:size-8 rounded-md bg-accent text-accent-foreground text-xs font-bold border border-accent/50"
-            >
-              {n}
-            </span>
-          ))}
-          {revealedCount === 0 && (
+          {revealed.map((n) => {
+            const isMatched = submittedTicket?.selectedNumbers.includes(n);
+            return (
+              <span
+                key={n}
+                className={cn(
+                  "keno-tile-revealing inline-flex items-center justify-center size-7 sm:size-8 rounded-md text-xs font-bold border",
+                  isMatched
+                    ? "bg-accent text-accent-foreground border-accent"
+                    : "bg-muted/60 text-foreground border-border/40"
+                )}
+              >
+                {n}
+              </span>
+            );
+          })}
+          {revealed.length === 0 && (
             <span className="text-xs text-muted-foreground self-center">
-              Spinning up the CSPRNG...
+              Preparing the draw…
             </span>
           )}
         </div>
         <div className="mt-2 h-1 w-full rounded-full bg-background/60 overflow-hidden">
           <div
             className="h-full bg-gradient-to-r from-primary to-accent keno-shimmer transition-all duration-200"
-            style={{ width: `${(revealedCount / 20) * 100}%` }}
+            style={{ width: `${(draw.revealedCount / 20) * 100}%` }}
           />
         </div>
       </div>
     );
   }
 
-  if (lastOutcome) {
-    const netMajor = (lastOutcome.netPayoutMinor / 100).toFixed(2);
+  // --- RESULTS phase: show final outcome of the user's ticket -------
+  if (phase === "RESULTS" && lastOutcome) {
     const isWin = lastOutcome.isWin;
+    const netMajor = (lastOutcome.netPayoutMinor / 100).toFixed(2);
     return (
       <div
         className={cn(
@@ -86,7 +146,6 @@ export function DrawBanner() {
           </div>
           <span className="text-xs text-muted-foreground font-mono">
             {lastOutcome.matchCount}/{lastOutcome.spots} hits
-            {isWin && ` · ${lastOutcome.multiplier}x`}
           </span>
         </div>
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center text-xs">
@@ -123,8 +182,7 @@ export function DrawBanner() {
                   : "keno-rose-text"
               )}
             >
-              {lastOutcome.netPayoutMinor > 0 ? "+" : ""}
-              ${netMajor}
+              {lastOutcome.netPayoutMinor > 0 ? "+" : ""}${netMajor}
             </div>
           </div>
           <div className="rounded-md bg-background/60 border border-border/40 p-2">
@@ -138,52 +196,50 @@ export function DrawBanner() {
             </div>
           </div>
         </div>
+        <div className="mt-2 text-[11px] text-muted-foreground">
+          Next round opens in{" "}
+          <span className="font-mono font-semibold keno-amber-text">
+            {Math.ceil(countdownMs / 1000)}s
+          </span>
+        </div>
+      </div>
+    );
+  }
+
+  // --- RESULTS phase but no ticket submitted -------------------------
+  if (phase === "RESULTS" && !lastOutcome) {
+    return (
+      <div className="rounded-xl border border-border/40 bg-card/60 backdrop-blur p-3 sm:p-4">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Lock className="size-4 text-muted-foreground" />
+            <span className="text-sm font-medium text-muted-foreground">
+              Round complete — no ticket submitted this round
+            </span>
+          </div>
+          <span className="text-xs font-mono text-muted-foreground">
+            Next round in {Math.ceil(countdownMs / 1000)}s
+          </span>
+        </div>
+      </div>
+    );
+  }
+
+  // --- WAITING phase -------------------------------------------------
+  if (phase === "WAITING") {
+    return (
+      <div className="rounded-xl border border-primary/40 bg-card/80 backdrop-blur p-3 sm:p-4 shadow-lg">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Sparkles className="size-4 keno-emerald-text" />
+            <span className="text-sm font-semibold keno-emerald-text">
+              Next round opening now…
+            </span>
+          </div>
+        </div>
       </div>
     );
   }
 
   return null;
-}
-
-/**
- * Compact summary card of the last draw for the history column.
- */
-export function LastResultCard() {
-  const lastOutcome = useKenoStore((s) => s.lastOutcome);
-  if (!lastOutcome) return null;
-
-  return (
-    <Card className="bg-card/80 backdrop-blur border-border/60">
-      <CardHeader className="pb-2">
-        <CardTitle className="text-sm font-semibold flex items-center justify-between">
-          <span>Last Ticket</span>
-          <span className="text-[10px] font-mono text-muted-foreground">
-            {lastOutcome.spots}-spot · ${(lastOutcome.stakeMinor / 100).toFixed(2)}
-          </span>
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="pt-0 text-xs space-y-2">
-        <div className="flex items-center justify-between">
-          <span className="text-muted-foreground">Outcome</span>
-          <span
-            className={cn(
-              "font-semibold",
-              lastOutcome.isWin ? "keno-amber-text" : "keno-rose-text"
-            )}
-          >
-            {lastOutcome.matchCount}/{lastOutcome.spots} ·{" "}
-            {lastOutcome.isWin
-              ? `+${(lastOutcome.netPayoutMinor / 100).toFixed(2)}`
-              : `-${Math.abs(lastOutcome.stakeMinor / 100).toFixed(2)}`}
-          </span>
-        </div>
-        <div className="flex items-center justify-between">
-          <span className="text-muted-foreground">Drawn</span>
-          <span className="font-mono">
-            {lastOutcome.drawnNumbers.join(", ")}
-          </span>
-        </div>
-      </CardContent>
-    </Card>
-  );
 }

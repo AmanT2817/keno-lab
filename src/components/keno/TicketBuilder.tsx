@@ -27,6 +27,8 @@ import {
   Save,
   Star,
   X,
+  Lock,
+  CheckCircle2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -39,18 +41,23 @@ const STAKE_PRESETS = [
 ];
 
 interface TicketBuilderProps {
-  onPlay: () => void;
+  onSubmit: () => void;
   isSubmitting: boolean;
   cooldownActive?: boolean;
   spendingLimitReached?: boolean;
 }
 
 export function TicketBuilder({
-  onPlay,
+  onSubmit,
   isSubmitting,
   cooldownActive = false,
   spendingLimitReached = false,
 }: TicketBuilderProps) {
+  const currentRound = useKenoStore((s) => s.currentRound);
+  const submittedTicket = useKenoStore((s) => s.submittedTicket);
+  const phase = currentRound?.round.phase;
+  const isBettingOpen = phase === "OPEN";
+  const hasSubmitted = !!submittedTicket;
   const selectedNumbers = useKenoStore((s) => s.selectedNumbers);
   const stakeMinor = useKenoStore((s) => s.stakeMinor);
   const setStake = useKenoStore((s) => s.setStake);
@@ -64,21 +71,26 @@ export function TicketBuilder({
   const saveCurrentSet = useKenoStore((s) => s.saveCurrentSet);
   const loadSavedSet = useKenoStore((s) => s.loadSavedSet);
   const deleteSavedSet = useKenoStore((s) => s.deleteSavedSet);
-  const isPlaying = useKenoStore((s) => s.isPlaying);
 
   const [saveName, setSaveName] = useState("");
 
   const spotCount = selectedNumbers.length;
+  // Block ALL selection interactions while betting is closed OR a ticket
+  // is already submitted for this round OR a cooldown is active.
+  const bettingClosed = !isBettingOpen || hasSubmitted;
   const blocked =
-    isPlaying ||
+    bettingClosed ||
     isSubmitting ||
     cooldownActive ||
     (spendingLimitReached && spotCount > 0);
 
-  const canPlay =
+  // Submit is allowed only when round is OPEN, no ticket yet submitted,
+  // at least MIN_SPOTS selected, no cooldown, no spending-limit breach.
+  const canSubmit =
+    isBettingOpen &&
+    !hasSubmitted &&
     spotCount >= KENO_MIN_SPOTS &&
     spotCount <= KENO_MAX_SPOTS &&
-    !isPlaying &&
     !isSubmitting &&
     !cooldownActive &&
     !spendingLimitReached;
@@ -300,11 +312,34 @@ export function TicketBuilder({
             </div>
           )}
 
-        {/* Play */}
+        {/* Betting-closed banner */}
+        {bettingClosed && !cooldownActive && !hasSubmitted && (
+          <div className="rounded-md bg-muted/30 border border-border/40 p-2 text-[11px] text-muted-foreground flex items-center gap-1.5">
+            <Lock className="size-3" />
+            {phase === "DRAWING"
+              ? "Round is being drawn — wait for the next round."
+              : phase === "RESULTS"
+                ? "Round complete — wait for the next round."
+                : phase === "WAITING"
+                  ? "Next round opening soon…"
+                  : "Betting is closed for this round."}
+          </div>
+        )}
+
+        {/* Already-submitted banner */}
+        {hasSubmitted && (
+          <div className="rounded-md bg-primary/10 border border-primary/30 p-2 text-[11px] text-primary flex items-center gap-1.5">
+            <CheckCircle2 className="size-3" />
+            Ticket submitted for round #{submittedTicket?.roundNumber ?? "?"}.
+            Wait for the draw and the next round to open.
+          </div>
+        )}
+
+        {/* Submit */}
         <Button
           size="lg"
-          onClick={onPlay}
-          disabled={!canPlay}
+          onClick={onSubmit}
+          disabled={!canSubmit}
           className={cn(
             "w-full text-base font-semibold tracking-wide",
             "bg-gradient-to-r from-primary to-accent text-primary-foreground",
@@ -312,26 +347,31 @@ export function TicketBuilder({
             "transition-all"
           )}
         >
-          {isSubmitting || isPlaying ? (
+          {isSubmitting ? (
             <>
               <Loader2 className="size-4 animate-spin" />
-              Drawing…
+              Submitting…
             </>
+          ) : hasSubmitted ? (
+            <>Ticket submitted</>
+          ) : !isBettingOpen ? (
+            <>Betting closed</>
           ) : cooldownActive ? (
             <>Cooling off…</>
           ) : (
             <>
               <Play className="size-4" />
-              Play Round
+              Submit Ticket
             </>
           )}
         </Button>
-        {!canPlay &&
+        {!canSubmit &&
           spotCount < KENO_MIN_SPOTS &&
-          !isPlaying &&
+          isBettingOpen &&
+          !hasSubmitted &&
           !cooldownActive && (
             <p className="text-[11px] text-muted-foreground text-center">
-              Select at least {KENO_MIN_SPOTS} number to play.
+              Select at least {KENO_MIN_SPOTS} number to submit a ticket.
             </p>
           )}
       </CardContent>
