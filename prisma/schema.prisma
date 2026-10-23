@@ -1,0 +1,95 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// A player holds the simulated balance. Balance is derived from
+// the ledger (sum of credits minus debits) for reconciliation.
+model Player {
+  id           String         @id @default(cuid())
+  name         String         @unique
+  balanceMinor Int            @default(100000) // 1000.00 in minor units (cents)
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+  tickets      Ticket[]
+  ledgerEntries LedgerEntry[]
+}
+
+// Lifecycle of a Keno round. In this single-player demo each round
+// receives one ticket, then transitions OPEN -> CLOSED -> DRAWN -> SETTLED.
+// The state machine is preserved so a multi-player extension is trivial.
+model GameRound {
+  id           String       @id @default(cuid())
+  status       String       // OPEN | CLOSED | DRAWN | SETTLED
+  opensAt      DateTime     @default(now())
+  closesAt     DateTime?
+  drawnAt      DateTime?
+  settledAt    DateTime?
+  rulesVersion String       @default("v1")
+  tickets      Ticket[]
+  drawResult   DrawResult?
+}
+
+// A submitted ticket. Selected numbers stored as JSON array string
+// (SQLite does not have a native array type). Money is integer minor units.
+model Ticket {
+  id              String         @id @default(cuid())
+  playerId        String
+  roundId         String
+  selectedNumbers String         // JSON-encoded number[]
+  spots           Int
+  stakeMinor      Int
+  paytableVersion String
+  status          String         // SUBMITTED | SETTLED
+  idempotencyKey  String         @unique
+  createdAt       DateTime       @default(now())
+  player          Player         @relation(fields: [playerId], references: [id])
+  round           GameRound      @relation(fields: [roundId], references: [id])
+  ticketResult    TicketResult?
+  ledgerEntries   LedgerEntry[]
+}
+
+// Immutable official draw for a round. One authoritative result per round.
+model DrawResult {
+  roundId          String   @unique
+  winningNumbers   String   // JSON-encoded number[] (20 unique values)
+  algorithmVersion String
+  createdAt        DateTime @default(now())
+  round            GameRound @relation(fields: [roundId], references: [id])
+}
+
+// Evaluated outcome for each ticket. At most one result per ticket.
+model TicketResult {
+  ticketId        String   @unique
+  matchedNumbers  String   // JSON-encoded number[]
+  matchCount      Int
+  payoutMinor     Int
+  isWin           Boolean
+  createdAt       DateTime @default(now())
+  ticket          Ticket   @relation(fields: [ticketId], references: [id])
+}
+
+// Append-only ledger of all money movements.
+model LedgerEntry {
+  id              String   @id @default(cuid())
+  playerId        String
+  ticketId        String?
+  roundId         String?
+  entryType       String   // STAKE_DEBIT | PAYOUT_CREDIT | REFUND_CREDIT | ADJUSTMENT
+  amountMinor     Int      // positive number; sign conveyed by entryType
+  idempotencyKey  String   @unique
+  createdAt       DateTime @default(now())
+  player          Player   @relation(fields: [playerId], references: [id])
+  ticket          Ticket?  @relation(fields: [ticketId], references: [id])
+}
